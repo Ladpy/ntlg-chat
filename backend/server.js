@@ -31,6 +31,7 @@ app.post("/new-user", async (request, response) => {
       message: "This name is already taken!",
     };
     response.status(400).send(JSON.stringify(result)).end();
+    return;
   }
   const { name } = request.body;
   const isExist = userState.find((user) => user.name === name);
@@ -58,33 +59,75 @@ app.post("/new-user", async (request, response) => {
 
 const server = http.createServer(app);
 const wsServer = new WebSocketServer({ server });
+
+const wsUserMap = new Map();
+
 wsServer.on("connection", (ws) => {
+  [...wsServer.clients]
+    .filter((o) => o.readyState === WebSocket.OPEN)
+    .forEach((o) => o.send(JSON.stringify(userState)));
+
   ws.on("message", (msg, isBinary) => {
-    const receivedMSG = JSON.parse(msg);
-    logger.info(`Message received: ${JSON.stringify(receivedMSG)}`);
-    // обработка выхода пользователя
-    if (receivedMSG.type === "exit") {
-      const idx = userState.findIndex(
-        (user) => user.name === receivedMSG.user.name
-      );
-      userState.splice(idx, 1);
-      [...wsServer.clients]
-        .filter((o) => o.readyState === WebSocket.OPEN)
-        .forEach((o) => o.send(JSON.stringify(userState)));
-      logger.info(`User with name "${receivedMSG.user.name}" has been deleted`);
+    let receivedMSG;
+    try {
+      receivedMSG = JSON.parse(msg);
+    } catch (error) {
+      logger.error(`Invalid JSON received: ${msg}`);
       return;
     }
-    // обработка отправки сообщения
+
+    logger.info(`Message received: ${JSON.stringify(receivedMSG)}`);
+
+    if (receivedMSG.type === "exit") {
+      const user = wsUserMap.get(ws);
+      if (user) {
+        const idx = userState.findIndex((u) => u.id === user.id);
+        if (idx !== -1) {
+          userState.splice(idx, 1);
+        }
+        wsUserMap.delete(ws);
+        [...wsServer.clients]
+          .filter((o) => o.readyState === WebSocket.OPEN)
+          .forEach((o) => o.send(JSON.stringify(userState)));
+        logger.info(`User with name "${user.name}" has been deleted`);
+      }
+      return;
+    }
+
     if (receivedMSG.type === "send") {
+      if (!wsUserMap.has(ws)) {
+        const user = userState.find((u) => u.id === receivedMSG.user.id);
+        if (!user) {
+          logger.warn(`User with id ${receivedMSG.user.id} not found`);
+          return;
+        }
+        wsUserMap.set(ws, user);
+      }
       [...wsServer.clients]
         .filter((o) => o.readyState === WebSocket.OPEN)
         .forEach((o) => o.send(msg, { binary: isBinary }));
       logger.info("Message sent to all users");
     }
   });
-  [...wsServer.clients]
-    .filter((o) => o.readyState === WebSocket.OPEN)
-    .forEach((o) => o.send(JSON.stringify(userState)));
+
+  ws.on("close", () => {
+    const user = wsUserMap.get(ws);
+    if (user) {
+      const idx = userState.findIndex((u) => u.id === user.id);
+      if (idx !== -1) {
+        userState.splice(idx, 1);
+      }
+      wsUserMap.delete(ws);
+      [...wsServer.clients]
+        .filter((o) => o.readyState === WebSocket.OPEN)
+        .forEach((o) => o.send(JSON.stringify(userState)));
+      logger.info(`User with name "${user.name}" disconnected`);
+    }
+  });
+
+  ws.on("error", (error) => {
+    logger.error(`WebSocket error: ${error.message}`);
+  });
 });
 
 const port = process.env.PORT || 3000;
